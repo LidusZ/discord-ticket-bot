@@ -1,54 +1,44 @@
-"""Сохранение базы в приватный репозиторий GitHub и восстановление после рестарта.
+"""Сохранение базы в закрытый канал на сервере Discord и восстановление после рестарта.
 
 У файловой системы Render Free нет постоянного диска: каждый рестарт или деплой
 начинается с чистого контейнера, и data/bot.db пропадает вместе со всеми /config.
-Модуль решает это без сторонних сервисов: перед стартом база скачивается из
-резервного репозитория (если локальной ещё нет), а дальше выгружается обратно —
-вскоре после изменения настроек, раз в час при любой активности и при остановке
-бота (Render присылает SIGTERM перед выключением).
+Внешние сервисы не нужны: бот хранит свежий снимок базы одним вложением в своём
+закрытом канале «бэкап-базы» (виден только боту и стаффу), а перед стартом
+скачивает его обратно. Канал живёт в Discord, поэтому переживает любые рестарты.
 
-Настройка (один раз, Render → Environment):
-  GITHUB_TOKEN  — fine-grained токен с правом «Contents: Read and write»
-                  только на резервный репозиторий;
-  BACKUP_REPO   — репозиторий для копий в формате «owner/name»
-                  (например LidusZ/discord-ticket-bot-backup, лучше приватный).
-
-Без этих переменных модуль просто выключен — локальная разработка не страдает.
+Выгрузка происходит вскоре после изменения настроек, раз в час при активности
+и при остановке бота (Render присылает SIGTERM перед выключением деплоя).
+Каких-либо настроек не требуется — используется обычный токен бота.
 """
 
-import base64
 import logging
-import os
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import Optional
+
+import discord
 
 import db
 
 log = logging.getLogger("tickets.persist")
 
 DB_PATH = Path(__file__).parent.parent / "data" / "bot.db"
-BACKUP_FILE = "bot.db"
-BRANCH = os.environ.get("BACKUP_BRANCH", "main")
-CONTENTS_URL = "https://api.github.com/repos/{repo}/contents/" + BACKUP_FILE
+# Канал ищем по подстроке в имени, сообщение-хранилище — по подстроке в тексте.
+CHANNEL_MARKER = "бэкап-базы"
+MESSAGE_MARKER = "Автоматический бэкап базы"
+BACKUP_FILENAME = "bot.db"
 
 # Плановая копия — не чаще раза в час; изменение настроек выгружается уже через пару минут.
 REGULAR_INTERVAL_SECONDS = 3600
 IMPORTANT_DEBOUNCE_SECONDS = 120
 
-_TOKEN = os.environ.get("GITHUB_TOKEN")
-_REPO = os.environ.get("BACKUP_REPO")
+_last_backup_message_id: Optional[int] = None
 
 
 def is_enabled() -> bool:
-    return bool(_TOKEN and _REPO)
-
-
-def _headers() -> dict:
-    return {
-        "Authorization": f"Bearer {_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
+    # Хранилище в Discord доступно всегда: отдельные токены не нужны.
+    return True
 
 
 def snapshot_to(dest_path: Path) -> None:
@@ -60,84 +50,137 @@ def snapshot_to(dest_path: Path) -> None:
     dst.close()
 
 
-async def restore_if_missing() -> None:
-    """Скачивает базу из резервного репозитория, если локальной ещё нет —
-    ровно этот случай наступает при каждом старте контейнера Render."""
-    if not is_enabled():
-        log.info(
-            "Бэкап в GitHub выключен (задайте BACKUP_REPO и GITHUB_TOKEN) — "
-            "настройки будут пропадать при рестартах"
+def _backup_guild(bot) -> Optional[discord.Guild]:
+    """Сервер-хранитель: основной (из констант БД), иначе первый известный."""
+    return bot.get_guild(db.LEGACY_GUILD_ID) or (bot.guilds[0] if bot.guilds else None)
+
+
+async def find_or_create_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    """Закрытый канал для бэкапов: ищем по имени среди существующих, создаём если нет."""
+    for ch in guild.text_channels:
+        if CHANNEL_MARKER in ch.name:
+            return ch
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True,
+            attach_files=True, read_message_history=True,
+        ),
+    }
+    try:
+        return await guild.create_text_channel(
+            f"🔒 {CHANNEL_MARKER}",
+            overwrites=overwrites,
+            reason="Хранилище автоматических бэкапов базы",
         )
-        return
+    except discord.HTTPException:
+        log.warning("Не удалось создать канал для бэкапов — проверьте права бота на сервере")
+        return None
+
+
+async def restore_if_missing(bot) -> None:
+    """Скачивает последний снимок базы из Discord, если локальной ещё нет —
+    ровно этот случай наступает при каждом старте контейнера Render.
+
+    Вызывается из setup_hook до подключения к шлюзу, когда кэша серверов ещё нет,
+    поэтому работает напрямую через REST и основной сервер из констант БД.
+    """
+    global _last_backup_message_id
     if DB_PATH.exists():
-        log.info("Локальная база на месте — восстановление из GitHub не требуется")
+        log.info("Локальная база на месте — восстановление из Discord не требуется")
         return
 
     import aiohttp
 
     try:
-        async with aiohttp.ClientSession(total=30) as session:
-            async with session.get(
-                CONTENTS_URL.format(repo=_REPO), params={"ref": BRANCH}, headers=_headers()
-            ) as resp:
-                if resp.status == 404:
-                    log.info("В резервном репозитории ещё нет копии базы — начинаю с пустой")
-                    return
-                resp.raise_for_status()
-                payload = await resp.json()
+        raw_channels = await bot.http.get_guild_channels(db.LEGACY_GUILD_ID)
     except Exception:
-        log.warning("Не удалось скачать бэкап из GitHub — продолжаю с пустой базой", exc_info=True)
+        log.warning("Не получил каналы основного сервера — начинаю с пустой базы", exc_info=True)
+        return
+    channel_id = next(
+        (
+            c["id"] for c in raw_channels
+            if c.get("type") == discord.ChannelType.text.value
+            and CHANNEL_MARKER in (c.get("name") or "")
+        ),
+        None,
+    )
+    if channel_id is None:
+        log.info("Канала бэкапов ещё нет — начинаю с пустой базы")
         return
 
-    content = base64.b64decode(payload.get("content") or "")
-    if not content.startswith(b"SQLite format 3"):
-        log.warning("Файл в резервном репозитории не похож на SQLite-базу — не восстанавливаю")
+    try:
+        messages = await bot.http.get_channel_messages(channel_id, limit=50)
+    except Exception:
+        log.warning("Не прочитал канал бэкапов — начинаю с пустой базы", exc_info=True)
         return
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DB_PATH.write_bytes(content)
-    log.info("База восстановлена из GitHub (%d байт) — настройки и тикеты на месте", len(content))
+
+    for msg in messages:  # от новых к старым
+        if MESSAGE_MARKER not in (msg.get("content") or "") or not msg.get("attachments"):
+            continue
+        url = msg["attachments"][0].get("url")
+        if not url:
+            continue
+        try:
+            async with aiohttp.ClientSession(total=30) as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        continue
+                    content = await resp.read()
+        except Exception:
+            log.warning("Не скачал копию базы из Discord", exc_info=True)
+            return
+        if not content.startswith(b"SQLite format 3"):
+            log.warning("Вложение в канале бэкапов не похоже на SQLite-базу — пропускаю")
+            continue
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DB_PATH.write_bytes(content)
+        _last_backup_message_id = int(msg["id"])
+        log.info(
+            "База восстановлена из Discord (%d байт) — настройки и тикеты на месте",
+            len(content),
+        )
+        return
+    log.info("Копий базы в канале бэкапов не нашлось — начинаю с пустой")
 
 
-async def upload(reason: str) -> bool:
-    """Выгружает свежий снимок базы в резервный репозиторий. False — не удалось или выключено."""
-    if not is_enabled():
+async def upload(bot, reason: str) -> bool:
+    """Выгружает свежий снимок базы в канал бэкапов. Одно сообщение редактируется
+    на месте, чтобы канал не засорялся. False — не удалось."""
+    global _last_backup_message_id
+    guild = _backup_guild(bot)
+    if guild is None:
         return False
-
-    import aiohttp
+    channel = await find_or_create_channel(guild)
+    if channel is None:
+        return False
 
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir) / BACKUP_FILE
+            tmp_path = Path(tmp_dir) / BACKUP_FILENAME
             snapshot_to(tmp_path)
-            encoded = base64.b64encode(tmp_path.read_bytes()).decode("ascii")
-    except Exception:
-        log.warning("Не удалось собрать снимок базы для бэкапа", exc_info=True)
-        return False
+            payload_file = discord.File(tmp_path, filename=BACKUP_FILENAME)
 
-    body = {"message": f"Бэкап базы: {reason}", "content": encoded, "branch": BRANCH}
-    try:
-        async with aiohttp.ClientSession(total=30) as session:
-            # sha текущего файла нужен, чтобы обновить существующую копию (создать — можно без него).
-            async with session.get(
-                CONTENTS_URL.format(repo=_REPO), params={"ref": BRANCH}, headers=_headers()
-            ) as resp:
-                if resp.status == 200:
-                    body["sha"] = (await resp.json()).get("sha")
-                elif resp.status != 404:
-                    text = await resp.text()
-                    log.warning("GitHub не отдал состояние бэкапа (%s): %s", resp.status, text[:300])
-                    return False
-            async with session.put(
-                CONTENTS_URL.format(repo=_REPO),
-                headers={**_headers(), "Content-Type": "application/json"},
-                json=body,
-            ) as resp:
-                if resp.status in (200, 201):
-                    log.info("База выгружена в GitHub (%s)", reason)
-                    return True
-                text = await resp.text()
-                log.warning("GitHub не принял бэкап (%s): %s", resp.status, text[:300])
-                return False
+            message = None
+            if _last_backup_message_id:
+                try:
+                    message = await channel.fetch_message(_last_backup_message_id)
+                except discord.NotFound:
+                    message = None
+            if message is None:
+                async for old in channel.history(limit=20):
+                    if MESSAGE_MARKER in old.content and old.attachments:
+                        message = old
+                        break
+
+            text = f"🗄️ {MESSAGE_MARKER} ({reason})"
+            if message is not None:
+                await message.edit(content=text, attachments=[], file=payload_file)
+            else:
+                message = await channel.send(content=text, file=payload_file)
+            _last_backup_message_id = message.id
+        log.info("База выгружена в канал бэкапов (%s)", reason)
+        return True
     except Exception:
-        log.warning("Ошибка выгрузки бэкапа в GitHub", exc_info=True)
+        log.warning("Не удалось выгрузить бэкап в Discord (%s)", reason, exc_info=True)
         return False

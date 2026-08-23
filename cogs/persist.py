@@ -1,4 +1,4 @@
-"""Периодическая выгрузка базы в GitHub-репозиторий бэкапов (utils/persist.py).
+"""Периодическая выгрузка базы в закрытый Discord-канал бэкапов (utils/persist.py).
 
 Render Free не хранит файлы между рестартами, поэтому база выгружается:
 вскоре после изменения настроек, раз в час при любой активности — а при
@@ -28,8 +28,6 @@ class PersistCog(commands.Cog):
     @tasks.loop(minutes=5)
     async def _backup_loop(self):
         try:
-            if not persist.is_enabled():
-                return
             now = time.time()
             # Выгружаем только если после прошлой выгрузки база менялась.
             if db.last_write_ts <= self._last_upload_ts:
@@ -40,7 +38,7 @@ class PersistCog(commands.Cog):
             if not (due_regular or due_settings):
                 return
             reason = "изменение настроек" if due_settings else "плановая копия"
-            if await persist.upload(reason):
+            if await persist.upload(self.bot, reason):
                 self._last_upload_ts = now
         except Exception:
             traceback.print_exc()

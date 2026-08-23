@@ -68,8 +68,8 @@ class TicketBot(commands.Bot):
 
     async def setup_hook(self):
         # Файловая система Render Free пустая после каждого рестарта:
-        # сначала возвращаем базу из GitHub-бэкапа, потом открываем её.
-        await persist.restore_if_missing()
+        # сначала возвращаем базу из Discord-канала бэкапов, потом открываем её.
+        await persist.restore_if_missing(self)
         db.init_db()
         await self.load_cogs()
 
@@ -86,7 +86,7 @@ class TicketBot(commands.Bot):
         # Render присылает SIGTERM перед остановкой/деплоем — успеваем выгрузить
         # свежую базу (тикеты, комнаты, настройки), чтобы ничего не потерять.
         try:
-            await persist.upload("остановка бота")
+            await persist.upload(self, "остановка бота")
         except Exception:
             pass
         await super().close()
