@@ -76,7 +76,8 @@ class TicketsCog(commands.Cog):
         ticket = await self._current_ticket(interaction)
         if ticket is None:
             return
-        if ticket["status"] == "closed":
+        # Статус — по имени канала: база после рестарта может быть старше Discord.
+        if interaction.channel.name.startswith("closed-"):
             await interaction.response.send_message("Тикет уже закрыт.", ephemeral=True)
             return
         cfg = db.get_config(interaction.guild_id)

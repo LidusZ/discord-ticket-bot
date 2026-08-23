@@ -269,10 +269,14 @@ async def perform_close(
             pass
 
     base_name = channel.name[len("closed-"):] if channel.name.startswith("closed-") else channel.name
-    try:
-        await channel.edit(name=f"closed-{base_name}"[:100])
-    except discord.HTTPException:
-        pass
+    target_name = f"closed-{base_name}"[:100]
+    # Повторное закрытие не должно жечь лимит переименований канала (~2/10 мин):
+    # лишний edit заставил бы следующее настоящее переименование висеть минутами.
+    if channel.name != target_name:
+        try:
+            await channel.edit(name=target_name)
+        except discord.HTTPException:
+            pass
 
     db.mark_closed(channel.id)
     ticket = db.get_ticket(channel.id) or {**ticket, "status": "closed"}
@@ -314,7 +318,10 @@ async def perform_reopen(channel: discord.TextChannel, ticket: dict) -> str:
 
     new_name = channel.name
     if new_name.startswith("closed-"):
-        new_name = f"ticket-{new_name[len('closed-'):]}"
+        stripped = new_name[len("closed-"):]
+        # Префикс «ticket-» уже сидит в stripped; дописываем его только
+        # старым каналам без него, иначе получается ticket-ticket-NNNN.
+        new_name = stripped if stripped.startswith("ticket-") else f"ticket-{stripped}"
         try:
             await channel.edit(name=new_name[:100])
         except discord.HTTPException:

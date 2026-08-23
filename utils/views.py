@@ -55,7 +55,10 @@ async def begin_close(interaction: discord.Interaction) -> None:
     cfg = db.get_config(interaction.guild_id)
     if not await checks.ensure_access(interaction, cfg["staff_role_ids"], ticket["owner_id"]):
         return
-    if ticket["status"] == "closed":
+    # Статус берём из имени канала, а не из базы: после рестарта Render база
+    # может быть старше Discord (снимок выгружается с задержкой), и проверка
+    # по устаревшей записи навсегда блокирует кнопку. Действие само чинит базу.
+    if interaction.channel.name.startswith("closed-"):
         await interaction.response.send_message("Тикет уже закрыт.", ephemeral=True)
         return
     await interaction.response.send_message(
@@ -73,7 +76,7 @@ async def confirm_close(interaction: discord.Interaction) -> None:
     closer = await checks.ensure_access(interaction, cfg["staff_role_ids"], ticket["owner_id"])
     if closer is None:
         return
-    if ticket["status"] == "closed":
+    if interaction.channel.name.startswith("closed-"):
         await interaction.response.edit_message(content="Тикет уже закрыт.", view=None)
         return
     await interaction.response.edit_message(content="🔒 Закрываю тикет…", view=None)
@@ -130,7 +133,7 @@ async def reopen_ticket(interaction: discord.Interaction) -> None:
     if ticket is None:
         await interaction.response.send_message("Это не тикет.", ephemeral=True)
         return
-    if ticket["status"] != "closed":
+    if not interaction.channel.name.startswith("closed-"):
         await interaction.response.send_message("Тикет ещё открыт.", ephemeral=True)
         return
     cfg = db.get_config(interaction.guild_id)
@@ -151,7 +154,7 @@ async def delete_ticket(interaction: discord.Interaction) -> None:
     if ticket is None:
         await interaction.response.send_message("Это не тикет.", ephemeral=True)
         return
-    if ticket["status"] != "closed":
+    if not interaction.channel.name.startswith("closed-"):
         await interaction.response.send_message(
             "⛔ Удалять можно только закрытый тикет. Сначала закройте его.", ephemeral=True
         )

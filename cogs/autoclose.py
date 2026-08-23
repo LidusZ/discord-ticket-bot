@@ -50,6 +50,11 @@ class AutoCloseCog(commands.Cog):
                 channel = guild.get_channel(ticket["channel_id"])
                 if not isinstance(channel, discord.TextChannel):
                     continue
+                if channel.name.startswith("closed-"):
+                    # Закрытие потерялось при рестарте (база восстановлена старее
+                    # Discord) — чиним запись, транскрипт/оценку второй раз не шлём.
+                    db.mark_closed(channel.id)
+                    continue
                 idle_hours = (now - await self._last_activity_ts(channel)) / 3600
 
                 if close_hours > 0 and idle_hours >= close_hours:

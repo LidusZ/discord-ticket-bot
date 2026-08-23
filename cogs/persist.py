@@ -1,8 +1,9 @@
 """Периодическая выгрузка базы в закрытый Discord-канал бэкапов (utils/persist.py).
 
 Render Free не хранит файлы между рестартами, поэтому база выгружается:
-вскоре после изменения настроек, раз в час при любой активности — а при
-остановке бота последнюю копию отправляет main.py в close().
+вскоре после любой записи в базу (настройки, тикеты, комнаты), раз в час
+при активности — а при остановке бота последнюю копию отправляет main.py
+в close() по SIGTERM.
 """
 
 import time
@@ -32,12 +33,13 @@ class PersistCog(commands.Cog):
             # Выгружаем только если после прошлой выгрузки база менялась.
             if db.last_write_ts <= self._last_upload_ts:
                 return
-            settings_changed = db.config_write_ts > self._last_upload_ts
             due_regular = now - self._last_upload_ts >= persist.REGULAR_INTERVAL_SECONDS
-            due_settings = settings_changed and now - self._last_upload_ts >= persist.IMPORTANT_DEBOUNCE_SECONDS
-            if not (due_regular or due_settings):
+            # Любая запись важна наравне с настройками: потерянный при рестарте
+            # статус тикета ломает кнопки закрытия/переоткрытия/удаления.
+            due_write = now - db.last_write_ts >= persist.IMPORTANT_DEBOUNCE_SECONDS
+            if not (due_regular or due_write):
                 return
-            reason = "изменение настроек" if due_settings else "плановая копия"
+            reason = "изменение данных" if due_write else "плановая копия"
             if await persist.upload(self.bot, reason):
                 self._last_upload_ts = now
         except Exception:

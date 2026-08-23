@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import os
+import signal
 import sys
 import traceback
 from pathlib import Path
@@ -166,6 +167,15 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 
 async def main():
+    # По умолчанию SIGTERM убивает процесс мгновенно и close() с финальной
+    # выгрузкой базы не вызывается — без этой обработки деплой Render теряет
+    # всё записанное в базе с момента прошлой копии.
+    try:
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGTERM, lambda: asyncio.ensure_future(bot.close())
+        )
+    except NotImplementedError:
+        pass  # локальный запуск на Windows — сигналов нет, остановка через Ctrl+C
     async with bot:
         await bot.start(TOKEN)
 

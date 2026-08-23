@@ -42,10 +42,9 @@ MS_DEFAULT_LABELS = {
 
 _conn: Optional[sqlite3.Connection] = None
 
-# Метки времени последней записи в базу и последнего изменения настроек —
-# их читает utils/persist.py, чтобы решать, когда выгружать копию базы в GitHub.
+# Метка времени последней записи в базу — её читает utils/persist.py,
+# чтобы решать, когда выгружать снимок базы в Discord-канал бэкапов.
 last_write_ts = 0.0
-config_write_ts = 0.0
 
 
 class _TrackingConnection(sqlite3.Connection):
@@ -262,8 +261,6 @@ def _set(guild_id: int, field: str, value: Any) -> None:
     conn = connect()
     conn.execute(f"UPDATE guild_config SET {field} = ? WHERE guild_id = ?", (value, guild_id))
     conn.commit()
-    global config_write_ts
-    config_write_ts = time.time()
 
 
 def next_ticket_number(guild_id: int) -> int:
