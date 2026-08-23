@@ -52,6 +52,8 @@ python main.py
 | `/config members disable` | выключить и удалить счётчики |
 | `/config members labels` | свои подписи счётчиков (`{count}` — число) |
 | `/config members show` | состояние счётчиков и текущие числа |
+| `/startsd` | включить отправку «.Дм» в голосовой канал каждые 9 минут |
+| `/stopsd` | выключить отправку |
 | `/setup` | опубликовать панель создания тикетов |
 
 ## Деплой 24/7 бесплатно
@@ -89,6 +91,7 @@ cogs/tickets.py      /setup, /close, /claim, /add, /remove, /ticketinfo
 cogs/autoclose.py    фоновое автозакрытие тикетов
 cogs/rooms.py        join-to-create, события войсов, автоудаление пустых комнат
 cogs/members.py      фоновое обновление счётчиков участников
+cogs/sd.py           /startsd, /stopsd — периодическая «.Дм» в голосовой канал
 cogs/stats.py        /stats
 data/bot.db          база (в .gitignore, создаётся сама)
 ```

@@ -126,6 +126,9 @@ def init_db() -> None:
         "ALTER TABLE guild_config ADD COLUMN ms_ch_humans INTEGER",
         "ALTER TABLE guild_config ADD COLUMN ms_ch_bots INTEGER",
         "ALTER TABLE guild_config ADD COLUMN ms_labels TEXT",
+        # Периодическая отправка «.Дм» в голосовой канал (/startsd, /stopsd).
+        "ALTER TABLE guild_config ADD COLUMN sd_enabled INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE guild_config ADD COLUMN sd_channel_id INTEGER",
     ):
         try:
             conn.execute(ddl)
@@ -525,3 +528,13 @@ def get_memberstat_labels(guild_id: int) -> dict:
         except (ValueError, TypeError):
             pass
     return labels
+
+
+# === ПЕРИОДИЧЕСКОЕ СООБЩЕНИЕ В ГОЛОСОВОЙ КАНАЛ (SD) ==========================
+
+def set_sd_enabled(guild_id: int, enabled: bool) -> None:
+    _set(guild_id, "sd_enabled", int(enabled))
+
+
+def set_sd_channel(guild_id: int, channel_id: Optional[int]) -> None:
+    _set(guild_id, "sd_channel_id", channel_id)
