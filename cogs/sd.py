@@ -56,7 +56,18 @@ class SdCog(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def startsd(self, interaction: discord.Interaction, channel: Optional[discord.VoiceChannel] = None):
         """Без аргумента используется стандартный канал основного сервера."""
-        channel_id = channel.id if channel else DEFAULT_SD_CHANNEL_ID
+        if channel is not None:
+            channel_id = channel.id
+        else:
+            default = interaction.guild.get_channel(DEFAULT_SD_CHANNEL_ID)
+            if not isinstance(default, discord.VoiceChannel):
+                # Захардкоженный ID существует только на основном сервере;
+                # на остальных без явного аргумента отправка ушла бы «в никуда».
+                await interaction.response.send_message(
+                    "Укажите голосовой канал: `/startsd канал:<канал>`.", ephemeral=True
+                )
+                return
+            channel_id = default.id
         db.set_sd_channel(interaction.guild_id, channel_id)
         db.set_sd_enabled(interaction.guild_id, True)
 

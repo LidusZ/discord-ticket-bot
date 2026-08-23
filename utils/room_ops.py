@@ -98,7 +98,9 @@ async def spawn_room_for_member(member: discord.Member, trigger: discord.VoiceCh
             except discord.HTTPException:
                 pass
             return
-        db.delete_room(existing["voice_channel_id"])
+        # Голосовой канал снесли вручную: подчищаем остатки (кабинет, прихожую),
+        # чтобы они не висели сиротами, и создаём комнату заново.
+        await delete_room_everything(guild, existing)
 
     if len(category.channels) >= MAX_CHANNELS_IN_CATEGORY:
         _try_dm(member, "❌ В категории комнат закончилось место — попробуйте позже.")
@@ -368,9 +370,26 @@ async def _neutralize_overwrite(
 # === ПЕРЕДАЧА / ЗАБРАТЬ ======================================================
 
 async def transfer_ownership(guild: discord.Guild, room: dict, new_owner: discord.Member) -> None:
+    old_owner_id = room["owner_id"]
     db.update_room(room["voice_channel_id"], owner_id=new_owner.id)
     text = guild.get_channel(room.get("text_channel_id") or 0)
     if isinstance(text, discord.TextChannel):
+        # Кабинет видят только владелец и стафф: выдаём его новому владельцу,
+        # иначе он получит комнату, кнопки которой ему не видны. У старого
+        # персональный доступ забираем (доступ по ролям стаффа не трогаем).
+        old_owner = guild.get_member(old_owner_id)
+        if old_owner is not None and old_owner.id != new_owner.id:
+            try:
+                await _neutralize_overwrite(
+                    text, old_owner,
+                    "read_messages", "send_messages", "attach_files", "embed_links",
+                )
+            except discord.HTTPException:
+                traceback.print_exc()
+        try:
+            await text.set_permissions(new_owner, read_messages=True, send_messages=True)
+        except discord.HTTPException:
+            traceback.print_exc()
         try:
             await text.send(f"👑 {new_owner.mention} — новый владелец комнаты.")
         except discord.HTTPException:

@@ -62,6 +62,9 @@ class RoomsCog(commands.Cog):
                     db.update_room(voice.id, empty_since=None)
                 continue
             if not room["empty_since"]:
+                # Событие выхода могло потеряться (рестарт/даунтайм Render):
+                # запускаем таймер пустоты сейчас, иначе комната зависла бы навсегда.
+                db.update_room(voice.id, empty_since=now)
                 continue
             minutes = db.get_config(guild.id).get("room_empty_minutes") or 10
             if now - room["empty_since"] >= minutes * 60:

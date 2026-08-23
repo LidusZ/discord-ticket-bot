@@ -21,7 +21,9 @@ DEBOUNCE_SECONDS = 60
 class MembersCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self._refresh_scheduled = False
+        # Отдельный флаг дебаунса на каждый сервер: общий глотал бы события
+        # второго сервера, пока «спит» первый.
+        self._refresh_pending: set[int] = set()
 
     async def cog_load(self):
         self._update_loop.start()
@@ -53,10 +55,10 @@ class MembersCog(commands.Cog):
 
     async def _schedule_refresh(self, guild: discord.Guild) -> None:
         """Не даём рейду входов/выходов заспамить переименования: одна волна
-        обновления на минуту, числа всё равно считаются свежими."""
-        if self._refresh_scheduled:
+        обновления в минуту на сервер, числа всё равно считаются свежими."""
+        if guild.id in self._refresh_pending:
             return
-        self._refresh_scheduled = True
+        self._refresh_pending.add(guild.id)
         try:
             await asyncio.sleep(DEBOUNCE_SECONDS)
             if not self.bot.is_closed():
@@ -66,7 +68,7 @@ class MembersCog(commands.Cog):
         except Exception:
             traceback.print_exc()
         finally:
-            self._refresh_scheduled = False
+            self._refresh_pending.discard(guild.id)
 
 
 async def setup(bot):

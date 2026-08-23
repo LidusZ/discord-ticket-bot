@@ -105,6 +105,13 @@ class UserPickView(BasePersistentView):
             await interaction.response.edit_message(content="Комната больше не существует.", view=None)
             return
         target = self.pick.values[0]
+        if not isinstance(target, discord.Member):
+            # Селект позволяет выбрать пользователя не с сервера: с ним нельзя
+            # работать set_permissions (только Member/Role — см. правило №2).
+            await interaction.response.edit_message(
+                content="Выберите участника этого сервера.", view=None
+            )
+            return
         guild = interaction.guild
         voice = room_ops.room_voice(guild, room)
         result = ""
@@ -147,7 +154,9 @@ class UserPickView(BasePersistentView):
             await room_ops.unban_member(guild, room, target)
             result = f"🔓 {target.mention} снова может зайти в комнату."
         elif self.action == "transfer":
-            if not (target.voice and target.voice.channel and target.voice.channel.id == voice.id):
+            if target.id == room["owner_id"]:
+                result = "Вы уже владелец этой комнаты."
+            elif not (target.voice and target.voice.channel and target.voice.channel.id == voice.id):
                 result = "⛔ Передавать можно только тому, кто сейчас в комнате."
             else:
                 await room_ops.transfer_ownership(guild, room, target)

@@ -41,17 +41,29 @@ def render_label(template: str, count: int) -> str:
 
 
 async def create_counters(guild: discord.Guild, category_id: Optional[int]) -> dict[str, int]:
-    """Создаёт три канала-счётчика. Возвращает {поле_бд: id канала}."""
+    """Создаёт три канала-счётчика. Возвращает {поле_бд: id канала}.
+    При сбое посреди создания подчищает уже созданные, чтобы повторный
+    /config members enable не наделал дублей без записи в базе."""
     counts = compute_counts(guild)
     labels = db.get_memberstat_labels(guild.id)
     category = guild.get_channel(category_id or 0)
     target = category if isinstance(category, discord.CategoryChannel) else guild
     ids: dict[str, int] = {}
-    for field, key in FIELDS:
-        channel = await target.create_voice_channel(
-            render_label(labels[key], counts[key]), reason="Счётчики участников"
-        )
-        ids[field] = channel.id
+    try:
+        for field, key in FIELDS:
+            channel = await target.create_voice_channel(
+                render_label(labels[key], counts[key]), reason="Счётчики участников"
+            )
+            ids[field] = channel.id
+    except Exception:
+        for channel_id in ids.values():
+            leftover = guild.get_channel(channel_id)
+            if leftover is not None:
+                try:
+                    await leftover.delete(reason="Счётчики участников: откат после сбоя")
+                except discord.HTTPException:
+                    traceback.print_exc()
+        raise
     return ids
 
 
