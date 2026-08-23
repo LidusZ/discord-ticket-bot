@@ -320,7 +320,11 @@ class TicketsCog(commands.Cog):
             await ctx.message.delete()
         except discord.HTTPException:
             pass
-        embed = discord.Embed(title="Поддержка", description="To create a ticket use the Create ticket button", color=discord.Color.green())
+        embed = discord.Embed(
+            title="🎧 Поддержка",
+            description="Нажми кнопку **«Создать запрос»** ниже, чтобы обратиться в поддержку.",
+            color=discord.Color.green(),
+        )
         await ctx.send(embed=embed, view=TicketLauncherPanel())
 
     @commands.hybrid_command(name="close", help="Закрыть тикет в текущем канале.")
