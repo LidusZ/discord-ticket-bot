@@ -25,6 +25,9 @@ class ServerConfigCog(commands.Cog):
     categories_group = app_commands.Group(
         name="categories", parent=config_group, description="Категории на панели тикетов"
     )
+    voice_group = app_commands.Group(
+        name="voice", parent=config_group, description="Голосовые комнаты (Room Creator)"
+    )
 
     # --- Основные каналы ---
 
@@ -103,6 +106,44 @@ class ServerConfigCog(commands.Cog):
             for c in cfg["ticket_categories"]
             if current in c["label"].lower()
         ][:25]
+
+    # --- Голосовые комнаты (Room Creator) ---
+
+    @voice_group.command(name="trigger", description="Триггер-канал «Создать комнату»")
+    async def voice_trigger(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
+        db.set_voice_trigger(interaction.guild_id, channel.id)
+        await interaction.response.send_message(
+            f"✅ {channel.mention} теперь триггер: зашёл в него — получил личную комнату.",
+            ephemeral=True,
+        )
+
+    @voice_group.command(name="category", description="Категория, в которой создаются комнаты")
+    async def voice_category(self, interaction: discord.Interaction, channel: discord.CategoryChannel):
+        db.set_voice_category(interaction.guild_id, channel.id)
+        await interaction.response.send_message(
+            f"✅ Комнаты будут создаваться в категории {channel.mention}.", ephemeral=True
+        )
+
+    @voice_group.command(name="defaults", description="Шаблон имени и лимит новых комнат")
+    async def voice_defaults(
+        self,
+        interaction: discord.Interaction,
+        name: str = "{user}",
+        user_limit: app_commands.Range[int, 0, 99] = 0,
+    ):
+        """Плейсхолдеры: {user} — имя создателя, {server} — название сервера."""
+        db.set_voice_defaults(interaction.guild_id, name.strip(), user_limit)
+        limit_text = "без лимита" if user_limit == 0 else f"лимит {user_limit}"
+        await interaction.response.send_message(
+            f"✅ Новые комнаты: имя «{name.strip()}», {limit_text}.", ephemeral=True
+        )
+
+    @voice_group.command(name="empty_delete", description="Через сколько минут удалять пустую комнату")
+    async def voice_empty(self, interaction: discord.Interaction, minutes: app_commands.Range[int, 1, 120]):
+        db.set_room_empty_minutes(interaction.guild_id, minutes)
+        await interaction.response.send_message(
+            f"✅ Пустая комната будет удалена через **{minutes} мин**.", ephemeral=True
+        )
 
     # --- Лимиты и автозакрытие ---
 
@@ -185,6 +226,21 @@ class ServerConfigCog(commands.Cog):
         )
         embed.add_field(name="Автозакрытие", value=autoclose)
         embed.add_field(name="Всего тикетов создано", value=str(cfg["counter"]))
+
+        trigger = guild.get_channel(cfg.get("voice_trigger_id") or 0) if cfg.get("voice_trigger_id") else None
+        vcategory = guild.get_channel(cfg.get("voice_category_id") or 0) if cfg.get("voice_category_id") else None
+        template = cfg.get("voice_name_template") or "{user}"
+        embed.add_field(
+            name="Room Creator",
+            value=(
+                f"триггер: {trigger.mention if trigger else '❌ не задан'}\n"
+                f"категория: {vcategory.mention if vcategory else '❌ не задана'}\n"
+                f"имя: «{template}», лимит: {cfg.get('voice_user_limit') or 'нет'}\n"
+                f"удаление пустой: через {cfg.get('room_empty_minutes') or 10} мин\n"
+                f"комнат сейчас: {len(db.guild_rooms(guild.id))}"
+            ),
+            inline=False,
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

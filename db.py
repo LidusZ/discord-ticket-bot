@@ -86,8 +86,37 @@ def init_db() -> None:
             stars      INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5),
             rated_at   INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS rooms (
+            voice_channel_id INTEGER PRIMARY KEY,
+            guild_id         INTEGER NOT NULL,
+            text_channel_id  INTEGER UNIQUE,
+            lobby_channel_id INTEGER UNIQUE,
+            panel_message_id INTEGER,
+            owner_id         INTEGER NOT NULL,
+            is_private       INTEGER NOT NULL DEFAULT 0,
+            lobby_enabled    INTEGER NOT NULL DEFAULT 0,
+            chat_hidden      INTEGER NOT NULL DEFAULT 1,
+            created_at       INTEGER NOT NULL,
+            empty_since      INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_rooms_guild ON rooms(guild_id);
         """
     )
+
+    # Миграция настроек Room Creator: CREATE TABLE IF NOT EXISTS не добавляет
+    # колонки в уже существующую guild_config, поэтому добавляем их точечно.
+    for ddl in (
+        "ALTER TABLE guild_config ADD COLUMN voice_trigger_id INTEGER",
+        "ALTER TABLE guild_config ADD COLUMN voice_category_id INTEGER",
+        "ALTER TABLE guild_config ADD COLUMN voice_name_template TEXT",
+        "ALTER TABLE guild_config ADD COLUMN voice_user_limit INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE guild_config ADD COLUMN room_empty_minutes INTEGER NOT NULL DEFAULT 10",
+    ):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует
 
     if not conn.execute("SELECT 1 FROM guild_config LIMIT 1").fetchone():
         if LEGACY_GUILD_ID and LEGACY_CATEGORY_ID:
@@ -361,3 +390,89 @@ def _update_ticket(channel_id: int, **fields: Any) -> None:
     conn = connect()
     conn.execute(f"UPDATE tickets SET {keys} WHERE channel_id = ?", values)
     conn.commit()
+
+
+# === ГОЛОСОВЫЕ КОМНАТЫ (ROOM CREATOR) ========================================
+
+def set_voice_trigger(guild_id: int, channel_id: int) -> None:
+    _set(guild_id, "voice_trigger_id", channel_id)
+
+
+def set_voice_category(guild_id: int, channel_id: int) -> None:
+    _set(guild_id, "voice_category_id", channel_id)
+
+
+def set_voice_defaults(guild_id: int, name_template: str, user_limit: int) -> None:
+    _set(guild_id, "voice_name_template", name_template)
+    _set(guild_id, "voice_user_limit", user_limit)
+
+
+def set_room_empty_minutes(guild_id: int, minutes: int) -> None:
+    _set(guild_id, "room_empty_minutes", minutes)
+
+
+def create_room(
+    voice_channel_id: int,
+    guild_id: int,
+    text_channel_id: int,
+    owner_id: int,
+    is_private: bool = False,
+    chat_hidden: bool = True,
+) -> None:
+    conn = connect()
+    conn.execute(
+        "INSERT INTO rooms (voice_channel_id, guild_id, text_channel_id, owner_id,"
+        " is_private, chat_hidden, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (voice_channel_id, guild_id, text_channel_id, owner_id,
+         int(is_private), int(chat_hidden), int(time.time())),
+    )
+    conn.commit()
+
+
+def get_room(voice_channel_id: int) -> Optional[dict]:
+    row = connect().execute("SELECT * FROM rooms WHERE voice_channel_id = ?", (voice_channel_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def find_room_by_text(channel_id: int) -> Optional[dict]:
+    row = connect().execute("SELECT * FROM rooms WHERE text_channel_id = ?", (channel_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def find_room_by_lobby(channel_id: int) -> Optional[dict]:
+    row = connect().execute("SELECT * FROM rooms WHERE lobby_channel_id = ?", (channel_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def find_room_of_owner(guild_id: int, user_id: int) -> Optional[dict]:
+    row = connect().execute(
+        "SELECT * FROM rooms WHERE guild_id = ? AND owner_id = ?", (guild_id, user_id)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_room(voice_channel_id: int, **fields: Any) -> None:
+    if not fields:
+        return
+    keys = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [voice_channel_id]
+    conn = connect()
+    conn.execute(f"UPDATE rooms SET {keys} WHERE voice_channel_id = ?", values)
+    conn.commit()
+
+
+def delete_room(voice_channel_id: int) -> None:
+    conn = connect()
+    conn.execute("DELETE FROM rooms WHERE voice_channel_id = ?", (voice_channel_id,))
+    conn.commit()
+
+
+def guild_rooms(guild_id: int) -> list[dict]:
+    rows = connect().execute("SELECT * FROM rooms WHERE guild_id = ?", (guild_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def all_rooms() -> list[dict]:
+    rows = connect().execute("SELECT * FROM rooms").fetchall()
+    return [dict(r) for r in rows]
