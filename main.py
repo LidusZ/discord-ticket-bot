@@ -22,6 +22,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import db
+from utils import persist
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,6 +67,9 @@ class TicketBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
+        # Файловая система Render Free пустая после каждого рестарта:
+        # сначала возвращаем базу из GitHub-бэкапа, потом открываем её.
+        await persist.restore_if_missing()
         db.init_db()
         await self.load_cogs()
 
@@ -77,6 +81,15 @@ class TicketBot(commands.Bot):
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
         log.info("Слэш-команды синхронизированы")
+
+    async def close(self):
+        # Render присылает SIGTERM перед остановкой/деплоем — успеваем выгрузить
+        # свежую базу (тикеты, комнаты, настройки), чтобы ничего не потерять.
+        try:
+            await persist.upload("остановка бота")
+        except Exception:
+            pass
+        await super().close()
 
     async def load_cogs(self):
         cogs_dir = Path(__file__).parent / "cogs"
