@@ -252,7 +252,6 @@ async def perform_close(
     """Полное закрытие: права, переименование, база, транскрипт, оценка, уведомление."""
     guild = channel.guild
     owner = guild.get_member(ticket["owner_id"])
-    owner_target = owner or discord.Object(id=ticket["owner_id"])
 
     # Просьба об оценке — ДО отъёма прав у владельца.
     if rating_in_channel:
@@ -261,10 +260,13 @@ async def perform_close(
         except discord.HTTPException:
             pass
 
-    try:
-        await channel.set_permissions(owner_target, read_messages=False, reason="Закрытие тикета")
-    except discord.HTTPException:
-        pass
+    if owner is not None:
+        # set_permissions принимает только Member/Role — если владелец покинул сервер,
+        # править пермишены нечем и не для кого.
+        try:
+            await channel.set_permissions(owner, read_messages=False, reason="Закрытие тикета")
+        except discord.HTTPException:
+            pass
 
     base_name = channel.name[len("closed-"):] if channel.name.startswith("closed-") else channel.name
     try:
@@ -297,18 +299,18 @@ async def perform_close(
 async def perform_reopen(channel: discord.TextChannel, ticket: dict) -> str:
     guild = channel.guild
     owner = guild.get_member(ticket["owner_id"])
-    owner_target = owner or discord.Object(id=ticket["owner_id"])
-    try:
-        await channel.set_permissions(
-            owner_target,
-            read_messages=True,
-            send_messages=True,
-            attach_files=True,
-            embed_links=True,
-            reason="Переоткрытие тикета",
-        )
-    except discord.HTTPException:
-        pass
+    if owner is not None:
+        try:
+            await channel.set_permissions(
+                owner,
+                read_messages=True,
+                send_messages=True,
+                attach_files=True,
+                embed_links=True,
+                reason="Переоткрытие тикета",
+            )
+        except discord.HTTPException:
+            pass
 
     new_name = channel.name
     if new_name.startswith("closed-"):

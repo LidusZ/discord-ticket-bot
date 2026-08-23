@@ -3,8 +3,11 @@
 
 Каждый класс регистрируется в боте ровно один раз (bot.add_view) —
 благодаря фиксированным custom_id кнопки продолжают работать
-после перезапуска процесса.
+после перезапуска процесса. Логика кнопок вынесена в функции
+уровня модуля, чтобы её переиспользовали и новые, и легаси-кнопки.
 """
+
+import traceback
 
 import discord
 
@@ -13,6 +16,150 @@ from utils import checks
 
 PANEL_BUTTON_ID = "ticket_panel_create"
 PANEL_SELECT_ID = "ticket_panel_select"
+
+
+class BasePersistentView(discord.ui.View):
+    """Постоянный view, который сообщает об ошибках пользователю,
+    а не молча игнорирует нажатие."""
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
+        traceback.print_exception(type(error), error, error.__traceback__)
+        message = "❌ Не удалось обработать нажатие. Попробуйте ещё раз — если повторится, сообщите администратору."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception:
+            pass
+
+
+# === ОБЩАЯ ЛОГИКА КНОПОК =====================================================
+
+async def open_panel_modal(interaction: discord.Interaction) -> None:
+    """Кнопка панели при одной категории: модалка для первой категории."""
+    from utils import ticket_ops
+    cfg = db.get_config(interaction.guild_id)
+    first = cfg["ticket_categories"][0]["label"]
+    await ticket_ops.open_modal_for_category(interaction, first)
+
+
+async def begin_close(interaction: discord.Interaction) -> None:
+    from utils import ticket_ops
+    ticket = ticket_ops.resolve_ticket(interaction.channel)
+    if ticket is None:
+        await interaction.response.send_message(
+            "Здесь нельзя это делать — канал не является тикетом.", ephemeral=True
+        )
+        return
+    cfg = db.get_config(interaction.guild_id)
+    if not await checks.ensure_access(interaction, cfg["staff_role_ids"], ticket["owner_id"]):
+        return
+    if ticket["status"] == "closed":
+        await interaction.response.send_message("Тикет уже закрыт.", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        "Закрыть этот **тикет**?", view=ConfirmCloseView(), ephemeral=True
+    )
+
+
+async def confirm_close(interaction: discord.Interaction) -> None:
+    from utils import ticket_ops
+    ticket = ticket_ops.resolve_ticket(interaction.channel)
+    if ticket is None:
+        await interaction.response.edit_message(content="Это не тикет.", view=None)
+        return
+    cfg = db.get_config(interaction.guild_id)
+    closer = await checks.ensure_access(interaction, cfg["staff_role_ids"], ticket["owner_id"])
+    if closer is None:
+        return
+    if ticket["status"] == "closed":
+        await interaction.response.edit_message(content="Тикет уже закрыт.", view=None)
+        return
+    await interaction.response.edit_message(content="🔒 Закрываю тикет…", view=None)
+    is_owner = closer.id == ticket["owner_id"]
+    await ticket_ops.perform_close(
+        interaction.channel, ticket, cfg, closed_by=None if is_owner else closer,
+        rating_in_channel=is_owner,
+    )
+
+
+async def cancel_close(interaction: discord.Interaction) -> None:
+    await interaction.response.edit_message(content="Закрытие отменено.", view=None)
+
+
+async def claim_ticket(interaction: discord.Interaction) -> None:
+    from utils import ticket_ops
+    ticket = ticket_ops.resolve_ticket(interaction.channel)
+    if ticket is None:
+        await interaction.response.send_message("Это не тикет.", ephemeral=True)
+        return
+    cfg = db.get_config(interaction.guild_id)
+    staff = await checks.ensure_staff(interaction, cfg["staff_role_ids"])
+    if staff is None:
+        return
+    await interaction.response.defer()
+    await ticket_ops.claim_ticket(interaction.channel, ticket, staff)
+
+
+async def save_transcript(interaction: discord.Interaction) -> None:
+    from utils import ticket_ops
+    ticket = ticket_ops.resolve_ticket(interaction.channel)
+    if ticket is None:
+        await interaction.response.send_message("Это не тикет.", ephemeral=True)
+        return
+    cfg = db.get_config(interaction.guild_id)
+    if not await checks.ensure_staff(interaction, cfg["staff_role_ids"]):
+        return
+    await interaction.response.defer(ephemeral=True)
+    sent = await ticket_ops.send_transcript_to_logs(
+        interaction.channel, ticket, f"Запросил: {interaction.user.display_name}"
+    )
+    if sent:
+        await interaction.followup.send("✅ Транскрипт отправлен в лог-канал.", ephemeral=True)
+    else:
+        file = await ticket_ops.build_transcript(
+            interaction.channel, ticket, f"Запросил: {interaction.user.display_name}"
+        )
+        await interaction.followup.send(content="(Лог-канал не настроен)", file=file, ephemeral=True)
+
+
+async def reopen_ticket(interaction: discord.Interaction) -> None:
+    from utils import ticket_ops
+    ticket = ticket_ops.resolve_ticket(interaction.channel)
+    if ticket is None:
+        await interaction.response.send_message("Это не тикет.", ephemeral=True)
+        return
+    if ticket["status"] != "closed":
+        await interaction.response.send_message("Тикет ещё открыт.", ephemeral=True)
+        return
+    cfg = db.get_config(interaction.guild_id)
+    if not await checks.ensure_staff(interaction, cfg["staff_role_ids"]):
+        return
+    await interaction.response.defer()
+    notice = await ticket_ops.perform_reopen(interaction.channel, ticket)
+    await interaction.followup.send(notice)
+    try:
+        await interaction.message.delete()
+    except discord.HTTPException:
+        pass
+
+
+async def delete_ticket(interaction: discord.Interaction) -> None:
+    from utils import ticket_ops
+    ticket = ticket_ops.resolve_ticket(interaction.channel)
+    if ticket is None:
+        await interaction.response.send_message("Это не тикет.", ephemeral=True)
+        return
+    if ticket["status"] != "closed":
+        await interaction.response.send_message(
+            "⛔ Удалять можно только закрытый тикет. Сначала закройте его.", ephemeral=True
+        )
+        return
+    cfg = db.get_config(interaction.guild_id)
+    if not await checks.ensure_staff(interaction, cfg["staff_role_ids"]):
+        return
+    await ticket_ops.perform_delete(interaction)
 
 
 # === ПАНЕЛЬ СОЗДАНИЯ ТИКЕТА ==================================================
@@ -35,11 +182,11 @@ class TicketCategorySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        from utils import ticket_ops  # локальный импорт: views <-> ops ссылаются друг на друга
+        from utils import ticket_ops
         await ticket_ops.open_modal_for_category(interaction, self.values[0])
 
 
-class TicketPanelView(discord.ui.View):
+class TicketPanelView(BasePersistentView):
     """Сообщение-панель в канале поддержки. Одна категория — кнопка, несколько — меню."""
 
     def __init__(self, categories: list[dict] | None = None):
@@ -54,14 +201,26 @@ class TicketPanelView(discord.ui.View):
                 style=discord.ButtonStyle.primary,
                 custom_id=PANEL_BUTTON_ID,
             )
-            button.callback = self._create
+            button.callback = lambda interaction: open_panel_modal(interaction)
             self.add_item(button)
 
-    async def _create(self, interaction: discord.Interaction):
-        from utils import ticket_ops
-        cfg = db.get_config(interaction.guild_id)
-        first = cfg["ticket_categories"][0]["label"]
-        await ticket_ops.open_modal_for_category(interaction, first)
+
+class PanelDispatchView(BasePersistentView):
+    """Регистрационный view панели: держит обработчики и кнопки, и меню,
+    чтобы работали уже опубликованные панели любого вида после рестарта.
+    Сам этот view никуда не отправляется (как LegacyCompatView)."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketCategorySelect(db.DEFAULT_CATEGORIES))
+        button = discord.ui.Button(
+            label="Создать обращение",
+            emoji="🎫",
+            style=discord.ButtonStyle.primary,
+            custom_id=PANEL_BUTTON_ID,
+        )
+        button.callback = lambda interaction: open_panel_modal(interaction)
+        self.add_item(button)
 
 
 class TicketReasonModal(discord.ui.Modal):
@@ -84,164 +243,98 @@ class TicketReasonModal(discord.ui.Modal):
 
 # === КНОПКИ ВНУТРИ ОТКРЫТОГО ТИКЕТА ==========================================
 
-class OpenControlsView(discord.ui.View):
+class OpenControlsView(BasePersistentView):
     def __init__(self):
         super().__init__(timeout=None)
 
-    async def _ticket(self, interaction: discord.Interaction) -> dict | None:
-        from utils import ticket_ops
-        ticket = ticket_ops.resolve_ticket(interaction.channel)
-        if ticket is None:
-            await interaction.response.send_message(
-                "Здесь нельзя это делать — канал не является тикетом.", ephemeral=True
-            )
-        return ticket
-
     @discord.ui.button(label="Закрыть", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="ticket_btn_close")
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
-        ticket = await self._ticket(interaction)
-        if ticket is None:
-            return
-        cfg = db.get_config(interaction.guild_id)
-        if not await checks.ensure_access(interaction, cfg["staff_role_ids"], ticket["owner_id"]):
-            return
-        await interaction.response.send_message("Закрыть этот **тикет**?", view=ConfirmCloseView(), ephemeral=True)
+        await begin_close(interaction)
 
     @discord.ui.button(label="Взять в работу", emoji="🙋", style=discord.ButtonStyle.success, custom_id="ticket_btn_claim")
     async def claim(self, interaction: discord.Interaction, _: discord.ui.Button):
-        ticket = await self._ticket(interaction)
-        if ticket is None:
-            return
-        cfg = db.get_config(interaction.guild_id)
-        staff = await checks.ensure_staff(interaction, cfg["staff_role_ids"])
-        if staff is None:
-            return
-        from utils import ticket_ops
-        await interaction.response.defer()
-        await ticket_ops.claim_ticket(interaction.channel, ticket, staff)
+        await claim_ticket(interaction)
 
     @discord.ui.button(label="Транскрипт", emoji="📄", style=discord.ButtonStyle.secondary, custom_id="ticket_btn_transcript")
     async def transcript(self, interaction: discord.Interaction, _: discord.ui.Button):
-        ticket = await self._ticket(interaction)
-        if ticket is None:
-            return
-        cfg = db.get_config(interaction.guild_id)
-        if not await checks.ensure_staff(interaction, cfg["staff_role_ids"]):
-            return
-        await interaction.response.defer(ephemeral=True)
-        from utils import ticket_ops
-        sent = await ticket_ops.send_transcript_to_logs(
-            interaction.channel, ticket, f"Запросил: {interaction.user.display_name}"
-        )
-        if sent:
-            await interaction.followup.send("✅ Транскрипт отправлен в лог-канал.", ephemeral=True)
-        else:
-            file = await ticket_ops.build_transcript(
-                interaction.channel, ticket, f"Запросил: {interaction.user.display_name}"
-            )
-            await interaction.followup.send(content="(Лог-канал не настроен)", file=file, ephemeral=True)
+        await save_transcript(interaction)
 
 
 # === ПОДТВЕРЖДЕНИЕ ЗАКРЫТИЯ ==================================================
 
-class ConfirmCloseView(discord.ui.View):
+class ConfirmCloseView(BasePersistentView):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Да, закрыть", emoji="✅", style=discord.ButtonStyle.danger, custom_id="ticket_btn_confirm_close")
     async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
-        from utils import ticket_ops
-        ticket = ticket_ops.resolve_ticket(interaction.channel)
-        if ticket is None:
-            await interaction.response.edit_message(content="Это не тикет.", view=None)
-            return
-        cfg = db.get_config(interaction.guild_id)
-        closer = await checks.ensure_access(interaction, cfg["staff_role_ids"], ticket["owner_id"])
-        if closer is None:
-            return
-        if ticket["status"] == "closed":
-            await interaction.response.edit_message(content="Тикет уже закрыт.", view=None)
-            return
-        await interaction.response.edit_message(content="🔒 Закрываю тикет…", view=None)
-        is_owner = closer.id == ticket["owner_id"]
-        await ticket_ops.perform_close(
-            interaction.channel, ticket, cfg, closed_by=None if is_owner else closer,
-            rating_in_channel=is_owner,
-        )
+        await confirm_close(interaction)
 
     @discord.ui.button(label="Отмена", emoji="↩️", style=discord.ButtonStyle.secondary, custom_id="ticket_btn_cancel_close")
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.edit_message(content="Закрытие отменено.", view=None)
+        await cancel_close(interaction)
 
 
 # === КНОПКИ В ЗАКРЫТОМ ТИКЕТЕ ================================================
 
-class ClosedControlsView(discord.ui.View):
+class ClosedControlsView(BasePersistentView):
     def __init__(self):
         super().__init__(timeout=None)
 
-    async def _closed_ticket(self, interaction: discord.Interaction) -> dict | None:
-        from utils import ticket_ops
-        ticket = ticket_ops.resolve_ticket(interaction.channel)
-        if ticket is None:
-            await interaction.response.send_message("Это не тикет.", ephemeral=True)
-        elif ticket["status"] != "closed":
-            await interaction.response.send_message("Тикет ещё открыт.", ephemeral=True)
-            ticket = None
-        return ticket
-
-    @discord.ui.button(label="Переоткрыть", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="ticket_btn_reopen")
+    @discord.ui.button(label="Переоткрыть", emoji="🔓", style=discord.ButtonStyle.primary, custom_id="ticket_btn_reopen")
     async def reopen(self, interaction: discord.Interaction, _: discord.ui.Button):
-        ticket = await self._closed_ticket(interaction)
-        if ticket is None:
-            return
-        cfg = db.get_config(interaction.guild_id)
-        if not await checks.ensure_staff(interaction, cfg["staff_role_ids"]):
-            return
-        await interaction.response.defer()
-        notice = await ticket_ops.perform_reopen(interaction.channel, ticket)
-        await interaction.followup.send(notice)
-        try:
-            await interaction.message.delete()
-        except discord.HTTPException:
-            pass
+        await reopen_ticket(interaction)
 
     @discord.ui.button(label="Транскрипт", emoji="📄", style=discord.ButtonStyle.secondary, custom_id="ticket_btn_transcript_closed")
     async def transcript(self, interaction: discord.Interaction, _: discord.ui.Button):
-        ticket = await self._closed_ticket(interaction)
-        if ticket is None:
-            return
-        cfg = db.get_config(interaction.guild_id)
-        if not await checks.ensure_staff(interaction, cfg["staff_role_ids"]):
-            return
-        await interaction.response.defer(ephemeral=True)
-        from utils import ticket_ops
-        sent = await ticket_ops.send_transcript_to_logs(
-            interaction.channel, ticket, f"Запросил: {interaction.user.display_name}"
-        )
-        if sent:
-            await interaction.followup.send("✅ Транскрипт отправлен в лог-канал.", ephemeral=True)
-        else:
-            file = await ticket_ops.build_transcript(
-                interaction.channel, ticket, f"Запросил: {interaction.user.display_name}"
-            )
-            await interaction.followup.send(content="(Лог-канал не настроен)", file=file, ephemeral=True)
+        await save_transcript(interaction)
 
     @discord.ui.button(label="Удалить тикет", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="ticket_btn_delete")
     async def delete(self, interaction: discord.Interaction, _: discord.ui.Button):
-        ticket = await self._closed_ticket(interaction)
-        if ticket is None:
-            return
-        cfg = db.get_config(interaction.guild_id)
-        if not await checks.ensure_staff(interaction, cfg["staff_role_ids"]):
-            return
-        from utils import ticket_ops
-        await ticket_ops.perform_delete(interaction)
+        await delete_ticket(interaction)
+
+
+# === КНОПКИ ОТ СТАРОЙ ВЕРСИИ БОТА ============================================
+# Сообщения, опубликованные до переписывания, хранят старые custom_id.
+# Регистрируем те же идентификаторы, чтобы старая панель и старые тикеты
+# продолжали работать под новым кодом. Сам этот view никуда не отправляется.
+
+class LegacyCompatView(BasePersistentView):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Создать запрос (стар.)", emoji="👍", custom_id="create_ticket_panel_btn")
+    async def legacy_panel(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await open_panel_modal(interaction)
+
+    @discord.ui.button(label="Закрыть (стар.)", emoji="🔒", custom_id="close_ticket_init_btn")
+    async def legacy_close_init(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await begin_close(interaction)
+
+    @discord.ui.button(label="Да (стар.)", emoji="✅", custom_id="confirm_close_btn")
+    async def legacy_confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await confirm_close(interaction)
+
+    @discord.ui.button(label="Отменить (стар.)", emoji="↩️", custom_id="cancel_close_btn")
+    async def legacy_cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await cancel_close(interaction)
+
+    @discord.ui.button(label="Сохранить диалог (стар.)", emoji="📄", custom_id="save_transcript_btn")
+    async def legacy_save(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await save_transcript(interaction)
+
+    @discord.ui.button(label="Переоткрыть (стар.)", emoji="🔓", custom_id="reopen_ticket_btn")
+    async def legacy_reopen(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await reopen_ticket(interaction)
+
+    @discord.ui.button(label="Удалить тикет (стар.)", emoji="⛔", custom_id="delete_ticket_btn")
+    async def legacy_delete(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await delete_ticket(interaction)
 
 
 # === ОЦЕНКА ПОДДЕРЖКИ ========================================================
 
-class RatingStarsView(discord.ui.View):
+class RatingStarsView(BasePersistentView):
     """Пять звёзд. Работает и в канале тикета, и в ЛС пользователя."""
 
     def __init__(self):
@@ -292,9 +385,10 @@ def build_rating_embed() -> discord.Embed:
 
 
 ALL_PERSISTENT_VIEWS = (
-    TicketPanelView,
+    PanelDispatchView,
     OpenControlsView,
     ConfirmCloseView,
     ClosedControlsView,
+    LegacyCompatView,
     RatingStarsView,
 )
