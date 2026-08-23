@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import aiohttp
+
 # Локальный запуск читает .env рядом с проектом; на Render переменная задаётся в панели.
 try:
     from dotenv import load_dotenv
@@ -19,7 +21,7 @@ except ImportError:
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import db
 from utils import persist
@@ -72,6 +74,7 @@ class TicketBot(commands.Bot):
         await persist.restore_if_missing(self)
         db.init_db()
         await self.load_cogs()
+        keep_self_awake.start()
 
         # Мгновенное появление команд на известных серверах + глобальная синхронизация
         # для новых серверов (там команды подтянутся в течение часа или при заходе бота).
@@ -105,6 +108,30 @@ class TicketBot(commands.Bot):
 
 
 bot = TicketBot()
+
+
+# --- Самопинг: бесплатный Render засыпает без входящего трафика за 15 минут. ---
+# Бот сам дёргает свой публичный адрес (Render выдаёт его в RENDER_EXTERNAL_URL),
+# поэтому внешний пингер вроде UptimeRobot больше не обязателен.
+@tasks.loop(minutes=10)
+async def keep_self_awake():
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        return  # локальный запуск — пинговать некуда
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=20)
+        ) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    log.warning("Самопинг %s вернул %s", url, resp.status)
+    except Exception:
+        pass  # разовый сбой сети не важен — следующий тик через 10 минут
+
+
+@keep_self_awake.before_loop
+async def _keepalive_wait_ready():
+    await bot.wait_until_ready()
 
 
 @bot.event

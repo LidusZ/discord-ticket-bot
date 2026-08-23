@@ -65,14 +65,15 @@ python main.py
 3. Runtime: **Python 3**; Build command: `pip install -r requirements.txt`; Start command: `python main.py`.
 4. Environment → добавьте `DISCORD_TOKEN` = токен бота. Instance type: **Free**.
 
-На бесплатном тарифе сервис засыпает без трафика — решается шагом 2.
+Бот не даёт сервису заснуть сам: каждые 10 минут он пингует свой собственный
+публичный адрес (`RENDER_EXTERNAL_URL`, Render выдаёт его автоматически) и
+отвечает на пинги встроенным HTTP-сервером. Настройки не требует.
 
-### 2. UptimeRobot
+### 2. UptimeRobot (необязательно)
 
-1. Зарегистрируйтесь на [uptimerobot.com](https://uptimerobot.com) (бесплатно).
-2. Add New Monitor → HTTP(s), URL: `https://ВАШ-СЕРВИС.onrender.com/`, интервал 5 минут.
-
-Бот теперь онлайн ~24/7: пингер будит сервис, а встроенный HTTP-сервер отвечает на пинги.
+Дублирующий пингер, если хочется подстраховаться: зарегистрируйтесь на
+[uptimerobot.com](https://uptimerobot.com), Add New Monitor → HTTP(s),
+URL: `https://ВАШ-СЕРВИС.onrender.com/`, интервал 5 минут. Работает и без него.
 
 ### 3. Сохранность настроек при рестартах
 
