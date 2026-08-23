@@ -5,6 +5,7 @@ import traceback
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 # === НАСТРОЙКИ МОДУЛЯ ===
@@ -19,6 +20,7 @@ STAFF_ROLE_IDS = [                      # ID ролей админов/моде�
 ]
 
 OWNER_TOPIC_PREFIX = "TICKET_OWNER:"  # метка владельца тикета в теме канала
+GUILD_ID = 0  # ID твоего сервера: если указан, слэш-команды появляются мгновенно; 0 = глобально (может занять до часа)
 
 
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
@@ -287,8 +289,32 @@ class TicketsCog(commands.Cog):
         for view in (TicketLauncherPanel(), CloseButtonView(), ConfirmCloseView(), TicketControlsView()):
             self.bot.add_view(view)
 
-    @commands.command()
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Синхронизируем слэш-команды один раз после подключения к Discord
+        if getattr(self.bot, "_slash_synced", False):
+            return
+        self.bot._slash_synced = True
+        try:
+            if GUILD_ID:
+                guild = discord.Object(id=GUILD_ID)
+                self.bot.tree.copy_global_to(guild=guild)
+                await self.bot.tree.sync(guild=guild)
+            else:
+                await self.bot.tree.sync()
+            print("[+] Слэш-команды синхронизированы")
+        except Exception:
+            print("[-] Не удалось синхронизировать слэш-команды")
+            traceback.print_exc()
+
+    @discord.app_commands.command(name="ticket", description="Написать в поддержку (создать тикет)")
+    @discord.app_commands.guild_only()
+    async def ticket(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(TicketReasonModal())
+
+    @commands.hybrid_command(name="setup_tickets", help="Публикует панель создания тикетов.")
     @commands.has_permissions(administrator=True)
+    @discord.app_commands.default_permissions(administrator=True)
     async def setup_tickets(self, ctx):
         try:
             await ctx.message.delete()
@@ -297,7 +323,7 @@ class TicketsCog(commands.Cog):
         embed = discord.Embed(title="Поддержка", description="To create a ticket use the Create ticket button", color=discord.Color.green())
         await ctx.send(embed=embed, view=TicketLauncherPanel())
 
-    @commands.command()
+    @commands.hybrid_command(name="close", help="Закрыть тикет в текущем канале.")
     async def close(self, ctx):
         channel = ctx.channel
         if getattr(channel, "category_id", None) != TICKET_CATEGORY_ID and not channel.name.startswith("ticket-"):
