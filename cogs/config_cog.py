@@ -28,6 +28,9 @@ class ServerConfigCog(commands.Cog):
     voice_group = app_commands.Group(
         name="voice", parent=config_group, description="Голосовые комнаты (Room Creator)"
     )
+    members_group = app_commands.Group(
+        name="members", parent=config_group, description="Счётчики участников сервера"
+    )
 
     # --- Основные каналы ---
 
@@ -145,6 +148,104 @@ class ServerConfigCog(commands.Cog):
             f"✅ Пустая комната будет удалена через **{minutes} мин**.", ephemeral=True
         )
 
+    # --- Счётчики участников ---
+
+    @members_group.command(name="enable", description="Создать каналы All Members / Members / Bots")
+    async def members_enable(self, interaction: discord.Interaction, category: Optional[discord.CategoryChannel] = None):
+        """Без аргумента счётчики попадут в категорию текущего канала (или прошлую настройку)."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        from utils import member_stats_ops
+
+        cfg = db.get_config(interaction.guild_id)
+        if category is not None:
+            category_id = category.id
+        elif cfg.get("ms_category_id"):
+            category_id = cfg["ms_category_id"]
+        else:
+            category_id = getattr(interaction.channel, "category_id", None)
+
+        await member_stats_ops.delete_counters(interaction.guild, cfg)
+        try:
+            ids = await member_stats_ops.create_counters(interaction.guild, category_id)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ У бота нет права создавать голосовые каналы. Выдайте Manage Channels.",
+                ephemeral=True,
+            )
+            return
+        db.set_memberstats_category(interaction.guild_id, category_id)
+        db.set_memberstats_channels(interaction.guild_id, ids["ms_ch_all"], ids["ms_ch_humans"], ids["ms_ch_bots"])
+        db.set_memberstats_enabled(interaction.guild_id, True)
+
+        where = f"в категории <#{category_id}>" if category_id else "без категории"
+        await interaction.followup.send(
+            f"✅ Счётчики созданы {where}. Обновляются сами: по входам/выходам и "
+            f"каждые 5 минут (лимит Discord на переименование каналов).",
+            ephemeral=True,
+        )
+
+    @members_group.command(name="disable", description="Выключить и удалить каналы-счётчики")
+    async def members_disable(self, interaction: discord.Interaction):
+        from utils import member_stats_ops
+
+        cfg = db.get_config(interaction.guild_id)
+        if not cfg.get("ms_enabled") and not cfg.get("ms_ch_all"):
+            await interaction.response.send_message(
+                "Счётчики и так выключены.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        await member_stats_ops.delete_counters(interaction.guild, cfg)
+        db.set_memberstats_channels(interaction.guild_id, None, None, None)
+        db.set_memberstats_enabled(interaction.guild_id, False)
+        await interaction.followup.send("✅ Счётчики удалены. Настройки подписей сохранены.", ephemeral=True)
+
+    @members_group.command(name="labels", description="Свои подписи счётчиков, {count} — число")
+    async def members_labels(
+        self,
+        interaction: discord.Interaction,
+        all_label: app_commands.Range[str, 1, 90],
+        humans_label: app_commands.Range[str, 1, 90],
+        bots_label: app_commands.Range[str, 1, 90],
+    ):
+        """Пример: `Участники всего: {count}` / `Люди: {count}` / `Боты: {count}`."""
+        labels = {"all": all_label.strip(), "humans": humans_label.strip(), "bots": bots_label.strip()}
+        db.set_memberstat_labels(interaction.guild_id, labels)
+        await interaction.response.defer(ephemeral=True)
+        cfg = db.get_config(interaction.guild_id)
+        if cfg.get("ms_enabled"):
+            from utils import member_stats_ops
+            await member_stats_ops.refresh_guild(interaction.guild, cfg)
+        await interaction.followup.send("✅ Подписи сохранены и применены.", ephemeral=True)
+
+    @members_group.command(name="show", description="Текущее состояние счётчиков участников")
+    async def members_show(self, interaction: discord.Interaction):
+        from utils import member_stats_ops
+
+        cfg = db.get_config(interaction.guild_id)
+        labels = db.get_memberstat_labels(interaction.guild_id)
+        counts = member_stats_ops.compute_counts(interaction.guild)
+        enabled = bool(cfg.get("ms_enabled"))
+        lines = [
+            f"{labels[key]} — сейчас **{counts[key]}**"
+            for key in ("all", "humans", "bots")
+        ]
+        embed = discord.Embed(title="👥 Счётчики участников", color=discord.Color.blurple())
+        embed.add_field(
+            name="Статус",
+            value=("🟢 включены\n" + "\n".join(lines)) if enabled else "🔴 выключены (`/config members enable`)",
+            inline=False,
+        )
+        embed.add_field(
+            name="Категория",
+            value=(f"<#{cfg['ms_category_id']}>" if cfg.get("ms_category_id") else "—"),
+        )
+        embed.add_field(
+            name="Обновление",
+            value="по входу/выходу участников + каждые 5 минут",
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # --- Лимиты и автозакрытие ---
 
     @config_group.command(name="limits", description="Лимиты создания тикетов на пользователя")
@@ -241,6 +342,15 @@ class ServerConfigCog(commands.Cog):
             ),
             inline=False,
         )
+
+        if cfg.get("ms_enabled"):
+            ms_text = (
+                f"🟢 включены, категория: "
+                + (f"<#{cfg['ms_category_id']}>" if cfg.get("ms_category_id") else "без категории")
+            )
+        else:
+            ms_text = "🔴 выключены (`/config members enable`)"
+        embed.add_field(name="Счётчики участников", value=ms_text)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

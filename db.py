@@ -33,6 +33,13 @@ DEFAULT_CATEGORIES = [
     {"label": "Поддержка", "emoji": "🎧", "description": "Общие вопросы и помощь"},
 ]
 
+# Подписи каналов-счётчиков участников по умолчанию ({count} — число).
+MS_DEFAULT_LABELS = {
+    "all": "👥 All Members: {count}",
+    "humans": "👤 Members: {count}",
+    "bots": "🤖 Bots: {count}",
+}
+
 _conn: Optional[sqlite3.Connection] = None
 
 
@@ -112,6 +119,13 @@ def init_db() -> None:
         "ALTER TABLE guild_config ADD COLUMN voice_name_template TEXT",
         "ALTER TABLE guild_config ADD COLUMN voice_user_limit INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE guild_config ADD COLUMN room_empty_minutes INTEGER NOT NULL DEFAULT 10",
+        # Счётчики участников (голосовые каналы All Members / Members / Bots).
+        "ALTER TABLE guild_config ADD COLUMN ms_enabled INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE guild_config ADD COLUMN ms_category_id INTEGER",
+        "ALTER TABLE guild_config ADD COLUMN ms_ch_all INTEGER",
+        "ALTER TABLE guild_config ADD COLUMN ms_ch_humans INTEGER",
+        "ALTER TABLE guild_config ADD COLUMN ms_ch_bots INTEGER",
+        "ALTER TABLE guild_config ADD COLUMN ms_labels TEXT",
     ):
         try:
             conn.execute(ddl)
@@ -476,3 +490,38 @@ def guild_rooms(guild_id: int) -> list[dict]:
 def all_rooms() -> list[dict]:
     rows = connect().execute("SELECT * FROM rooms").fetchall()
     return [dict(r) for r in rows]
+
+
+# === СЧЁТЧИКИ УЧАСТНИКОВ =====================================================
+
+def set_memberstats_enabled(guild_id: int, enabled: bool) -> None:
+    _set(guild_id, "ms_enabled", int(enabled))
+
+
+def set_memberstats_category(guild_id: int, category_id: Optional[int]) -> None:
+    _set(guild_id, "ms_category_id", category_id)
+
+
+def set_memberstats_channels(guild_id: int, ch_all: Optional[int], humans: Optional[int], bots: Optional[int]) -> None:
+    _set(guild_id, "ms_ch_all", ch_all)
+    _set(guild_id, "ms_ch_humans", humans)
+    _set(guild_id, "ms_ch_bots", bots)
+
+
+def set_memberstat_labels(guild_id: int, labels: dict) -> None:
+    _set(guild_id, "ms_labels", json.dumps(labels, ensure_ascii=False))
+
+
+def get_memberstat_labels(guild_id: int) -> dict:
+    """Подписи каналов-счётчиков; отсутствующие ключи берутся из дефолта."""
+    cfg = get_config(guild_id)
+    raw = cfg.get("ms_labels")
+    labels = dict(MS_DEFAULT_LABELS)
+    if raw:
+        try:
+            stored = json.loads(raw)
+            if isinstance(stored, dict):
+                labels.update({k: v for k, v in stored.items() if v})
+        except (ValueError, TypeError):
+            pass
+    return labels
