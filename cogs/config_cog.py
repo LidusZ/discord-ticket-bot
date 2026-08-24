@@ -31,6 +31,9 @@ class ServerConfigCog(commands.Cog):
     members_group = app_commands.Group(
         name="members", parent=config_group, description="Счётчики участников сервера"
     )
+    invites_group = app_commands.Group(
+        name="invites", parent=config_group, description="Трекер приглашений"
+    )
 
     # --- Основные каналы ---
 
@@ -246,6 +249,72 @@ class ServerConfigCog(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # --- Трекер приглашений ---
+
+    @invites_group.command(name="log", description="Канал логов входов/выходов по приглашениям")
+    async def invites_log(
+        self,
+        interaction: discord.Interaction,
+        channel: Optional[discord.TextChannel] = None,
+    ):
+        """Без аргумента логи приглашений пойдут в общий канал логов тикетов."""
+        db.set_invite_log_channel(interaction.guild_id, channel.id if channel else None)
+        if channel:
+            text = f"✅ Логи приглашений будут отправляться в {channel.mention}."
+        else:
+            text = "✅ Отдельный канал сброшен — логи приглашений пойдут в общий канал логов тикетов."
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @invites_group.command(name="weekly", description="Топ инвайтеров за 7 дней раз в неделю")
+    async def invites_weekly(
+        self,
+        interaction: discord.Interaction,
+        channel: Optional[discord.TextChannel] = None,
+    ):
+        """Укажите канал — включить автопубликацию; вызвать без канала — выключить."""
+        if channel is None:
+            db.set_invite_weekly_channel(interaction.guild_id, None)
+            await interaction.response.send_message("🔴 Еженедельный топ инвайтеров выключен.", ephemeral=True)
+            return
+        import time
+
+        db.set_invite_weekly_channel(interaction.guild_id, channel.id)
+        # Неделя отсчитывается с момента включения, чтобы дайджесты были ровно раз в 7 дней.
+        db.set_invite_weekly_last(interaction.guild_id, int(time.time()))
+        await interaction.response.send_message(
+            f"✅ Раз в неделю в {channel.mention} будет публиковаться топ инвайтеров "
+            "за последние 7 дней. Первый — через неделю.",
+            ephemeral=True,
+        )
+
+    @invites_group.command(name="show", description="Состояние трекера приглашений")
+    async def invites_show(self, interaction: discord.Interaction):
+        cfg = db.get_config(interaction.guild_id)
+        guild = interaction.guild
+        log_ch = guild.get_channel(cfg["inv_log_channel_id"]) if cfg.get("inv_log_channel_id") else None
+        weekly_ch = guild.get_channel(cfg["inv_weekly_channel_id"]) if cfg.get("inv_weekly_channel_id") else None
+        last = cfg.get("inv_weekly_last_ts")
+
+        embed = discord.Embed(title="📨 Трекер приглашений", color=discord.Color.gold())
+        embed.add_field(
+            name="Канал логов",
+            value=log_ch.mention if log_ch else "не задан — используется общий канал логов тикетов",
+        )
+        if weekly_ch:
+            when = (
+                f"неделя отсчитывается от <t:{last}:d> <t:{last}:t>" if last else "первый дайджест в течение часа"
+            )
+            weekly_text = f"🟢 включён → {weekly_ch.mention}\n{when}"
+        else:
+            weekly_text = "🔴 выключен (`/config invites weekly #канал`)"
+        embed.add_field(name="Еженедельный топ за 7 дней", value=weekly_text)
+        embed.add_field(
+            name="Ручной показ",
+            value="`/invitetop` — только для администраторов",
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # --- Лимиты и автозакрытие ---
 
     @config_group.command(name="limits", description="Лимиты создания тикетов на пользователя")
@@ -351,6 +420,14 @@ class ServerConfigCog(commands.Cog):
         else:
             ms_text = "🔴 выключены (`/config members enable`)"
         embed.add_field(name="Счётчики участников", value=ms_text)
+
+        inv_log = guild.get_channel(cfg["inv_log_channel_id"]) if cfg.get("inv_log_channel_id") else None
+        inv_weekly = guild.get_channel(cfg["inv_weekly_channel_id"]) if cfg.get("inv_weekly_channel_id") else None
+        invites_text = (
+            f"логи: {inv_log.mention if inv_log else 'общий канал логов'}\n"
+            f"еженедельный топ: {inv_weekly.mention if inv_weekly else 'выключен'}"
+        )
+        embed.add_field(name="Трекер приглашений", value=invites_text)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

@@ -123,6 +123,25 @@ def init_db() -> None:
             empty_since      INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_rooms_guild ON rooms(guild_id);
+
+        CREATE TABLE IF NOT EXISTS invite_cache (
+            guild_id    INTEGER NOT NULL,
+            code        TEXT NOT NULL,
+            inviter_id  INTEGER,
+            uses        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS invite_joins (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id   INTEGER NOT NULL,
+            inviter_id INTEGER,
+            invitee_id INTEGER NOT NULL,
+            code       TEXT,
+            joined_at  INTEGER NOT NULL,
+            left_at    INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_invjoins_guild_time ON invite_joins(guild_id, joined_at);
         """
     )
 
@@ -144,6 +163,10 @@ def init_db() -> None:
         # Периодическая отправка «.Дм» в голосовой канал (/startsd, /stopsd).
         "ALTER TABLE guild_config ADD COLUMN sd_enabled INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE guild_config ADD COLUMN sd_channel_id INTEGER",
+        # Трекер приглашений: логи входов/выходов и еженедельный топ.
+        "ALTER TABLE guild_config ADD COLUMN inv_log_channel_id INTEGER",
+        "ALTER TABLE guild_config ADD COLUMN inv_weekly_channel_id INTEGER",
+        "ALTER TABLE guild_config ADD COLUMN inv_weekly_last_ts INTEGER",
     ):
         try:
             conn.execute(ddl)
@@ -422,6 +445,102 @@ def _update_ticket(channel_id: int, **fields: Any) -> None:
     conn = connect()
     conn.execute(f"UPDATE tickets SET {keys} WHERE channel_id = ?", values)
     conn.commit()
+
+
+# === ИНВАЙТЫ (ТРЕКЕР ПРИГЛАШЕНИЙ) ============================================
+
+def get_invite_cache(guild_id: int) -> dict[str, tuple]:
+    """Снимок приглашений сервера: код -> (id автора, использования)."""
+    rows = connect().execute(
+        "SELECT code, inviter_id, uses FROM invite_cache WHERE guild_id = ?", (guild_id,)
+    ).fetchall()
+    return {r["code"]: (r["inviter_id"], r["uses"]) for r in rows}
+
+
+def replace_invite_cache(guild_id: int, entries: list[tuple[str, Optional[int], int]]) -> None:
+    conn = connect()
+    conn.execute("DELETE FROM invite_cache WHERE guild_id = ?", (guild_id,))
+    conn.executemany(
+        "INSERT INTO invite_cache (guild_id, code, inviter_id, uses) VALUES (?, ?, ?, ?)",
+        [(guild_id, code, inviter_id, uses) for code, inviter_id, uses in entries],
+    )
+    conn.commit()
+
+
+def upsert_invite_cache_entry(guild_id: int, code: str, inviter_id: Optional[int], uses: int) -> None:
+    conn = connect()
+    conn.execute(
+        "INSERT INTO invite_cache (guild_id, code, inviter_id, uses) VALUES (?, ?, ?, ?)"
+        " ON CONFLICT(guild_id, code) DO UPDATE SET inviter_id = excluded.inviter_id,"
+        " uses = excluded.uses",
+        (guild_id, code, inviter_id, uses),
+    )
+    conn.commit()
+
+
+def delete_invite_cache_entry(guild_id: int, code: str) -> None:
+    conn = connect()
+    conn.execute("DELETE FROM invite_cache WHERE guild_id = ? AND code = ?", (guild_id, code))
+    conn.commit()
+
+
+def add_invite_join(guild_id: int, inviter_id: Optional[int], invitee_id: int, code: Optional[str]) -> None:
+    conn = connect()
+    conn.execute(
+        "INSERT INTO invite_joins (guild_id, inviter_id, invitee_id, code, joined_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (guild_id, inviter_id, invitee_id, code, int(time.time())),
+    )
+    conn.commit()
+
+
+def mark_invite_left(guild_id: int, invitee_id: int) -> bool:
+    """Помечает последний незакрытый заход участника как ушедший. False — нечего помечать."""
+    conn = connect()
+    cur = conn.execute(
+        "UPDATE invite_joins SET left_at = ?"
+        " WHERE id = (SELECT id FROM invite_joins"
+        "             WHERE guild_id = ? AND invitee_id = ? AND left_at IS NULL"
+        "             ORDER BY joined_at DESC LIMIT 1)",
+        (int(time.time()), guild_id, invitee_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def invite_counts(guild_id: int, user_id: int) -> dict:
+    row = connect().execute(
+        "SELECT COUNT(*) AS total,"
+        " SUM(CASE WHEN left_at IS NULL THEN 1 ELSE 0 END) AS stayed"
+        " FROM invite_joins WHERE guild_id = ? AND inviter_id = ?",
+        (guild_id, user_id),
+    ).fetchone()
+    return {"total": row["total"], "stayed": row["stayed"] or 0}
+
+
+def invite_top(guild_id: int, since_ts: int, limit: int = 10) -> list[dict]:
+    """Топ инвайтеров с момента since_ts; ванити и неизвестные авторы (NULL) не участвуют."""
+    rows = connect().execute(
+        "SELECT inviter_id, COUNT(*) AS total,"
+        " SUM(CASE WHEN left_at IS NULL THEN 1 ELSE 0 END) AS stayed"
+        " FROM invite_joins"
+        " WHERE guild_id = ? AND joined_at >= ? AND inviter_id IS NOT NULL"
+        " GROUP BY inviter_id ORDER BY total DESC LIMIT ?",
+        (guild_id, since_ts, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_invite_log_channel(guild_id: int, channel_id: Optional[int]) -> None:
+    _set(guild_id, "inv_log_channel_id", channel_id)
+
+
+def set_invite_weekly_channel(guild_id: int, channel_id: Optional[int]) -> None:
+    _set(guild_id, "inv_weekly_channel_id", channel_id)
+
+
+def set_invite_weekly_last(guild_id: int, ts: int) -> None:
+    _set(guild_id, "inv_weekly_last_ts", ts)
 
 
 # === ГОЛОСОВЫЕ КОМНАТЫ (ROOM CREATOR) ========================================
