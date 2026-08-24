@@ -177,7 +177,7 @@ async def upload(bot, reason: str) -> bool:
 
             text = f"🗄️ {MESSAGE_MARKER} ({reason})"
             if message is not None:
-                await message.edit(content=text, attachments=[], file=payload_file)
+                await message.edit(content=text, attachments=[payload_file])
             else:
                 message = await channel.send(content=text, file=payload_file)
             _last_backup_message_id = message.id
