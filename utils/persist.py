@@ -95,7 +95,7 @@ async def restore_if_missing(bot) -> None:
     import aiohttp
 
     try:
-        raw_channels = await bot.http.get_guild_channels(db.LEGACY_GUILD_ID)
+        raw_channels = await bot.http.get_all_guild_channels(db.LEGACY_GUILD_ID)
     except Exception:
         log.warning("Не получил каналы основного сервера — начинаю с пустой базы", exc_info=True)
         return
@@ -112,7 +112,7 @@ async def restore_if_missing(bot) -> None:
         return
 
     try:
-        messages = await bot.http.get_channel_messages(channel_id, limit=50)
+        messages = await bot.http.logs_from(channel_id, limit=50)
     except Exception:
         log.warning("Не прочитал канал бэкапов — начинаю с пустой базы", exc_info=True)
         return
