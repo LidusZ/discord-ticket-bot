@@ -88,14 +88,28 @@ class InvitesCog(commands.Cog):
             return
         guild = member.guild
         info, note = await invite_ops.attribute_join(guild)
-        if info is not None:
-            db.add_invite_join(guild.id, info["inviter_id"], member.id, info["code"])
+        existing = db.get_invite_join(guild.id, member.id)
+        if existing is None:
+            # Один человек засчитывается один раз за всё время: повторные
+            # заходы после выхода новых записей не создают (защита от накрутки).
+            db.add_invite_join(
+                guild.id,
+                info["inviter_id"] if info else None,
+                member.id,
+                info["code"] if info else None,
+            )
+            embed = invite_ops.join_embed(member, info, note)
+        else:
+            # Уже был: просто возвращаем «живой» статус его первоначальному
+            # приглашению и пишем в лог, что счётчики не тронуты.
+            db.mark_invite_returned(guild.id, member.id)
+            embed = invite_ops.rejoin_embed(member, info, note)
         cfg = db.get_config(guild.id)
         channel = invite_ops.resolve_log_channel(guild, cfg)
         if channel is None:
             return
         try:
-            await channel.send(embed=invite_ops.join_embed(member, info, note))
+            await channel.send(embed=embed)
         except discord.HTTPException:
             pass
 

@@ -119,6 +119,24 @@ def leave_embed(member: discord.Member, counted: bool) -> discord.Embed:
     return discord.Embed(description=description, color=discord.Color.dark_grey())
 
 
+def rejoin_embed(member: discord.Member, info: Optional[dict], note: Optional[str]) -> discord.Embed:
+    """Лог повторного захода: в счётчики никому не идёт, защита от накрутки «вышел-зашёл»."""
+    if info is None:
+        description = f"🔁 {member.mention} вернулся на сервер — повторный заход никому не засчитан."
+    elif info["inviter_id"] is None:
+        description = f"🔁 {member.mention} вернулся по ванити-ссылке — повторный заход никому не засчитан."
+    else:
+        inviter = member.guild.get_member(info["inviter_id"])
+        who = inviter.mention if inviter else f"<@{info['inviter_id']}>"
+        description = f"🔁 {member.mention} вернулся по приглашению {who} — повторно не считается."
+    embed = discord.Embed(description=description, color=discord.Color.blurple())
+    if info and info.get("code"):
+        embed.set_footer(text=f"код приглашения: {info['code']}")
+    elif note:
+        embed.set_footer(text=note)
+    return embed
+
+
 def top_embed(guild: discord.Guild, rows: list[dict], title: str) -> discord.Embed:
     """Таблица топа для /invitetop и еженедельной автопубликации."""
     medals = ["🥇", "🥈", "🥉"]

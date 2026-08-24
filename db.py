@@ -494,8 +494,18 @@ def add_invite_join(guild_id: int, inviter_id: Optional[int], invitee_id: int, c
     conn.commit()
 
 
+def get_invite_join(guild_id: int, invitee_id: int) -> Optional[dict]:
+    """Запись о приглашении участника (одна на человека — повторные заходы не создают новых)."""
+    row = connect().execute(
+        "SELECT * FROM invite_joins WHERE guild_id = ? AND invitee_id = ?"
+        " ORDER BY joined_at DESC LIMIT 1",
+        (guild_id, invitee_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def mark_invite_left(guild_id: int, invitee_id: int) -> bool:
-    """Помечает последний незакрытый заход участника как ушедший. False — нечего помечать."""
+    """Помечает запись участника как ушедшего. False — нечего помечать."""
     conn = connect()
     cur = conn.execute(
         "UPDATE invite_joins SET left_at = ?"
@@ -503,6 +513,21 @@ def mark_invite_left(guild_id: int, invitee_id: int) -> bool:
         "             WHERE guild_id = ? AND invitee_id = ? AND left_at IS NULL"
         "             ORDER BY joined_at DESC LIMIT 1)",
         (int(time.time()), guild_id, invitee_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def mark_invite_returned(guild_id: int, invitee_id: int) -> bool:
+    """Вернувшийся после выхода снова считается «живым» приглашением.
+    Новая запись НЕ создаётся — одного человека засчитываем один раз."""
+    conn = connect()
+    cur = conn.execute(
+        "UPDATE invite_joins SET left_at = NULL"
+        " WHERE id = (SELECT id FROM invite_joins"
+        "             WHERE guild_id = ? AND invitee_id = ? AND left_at IS NOT NULL"
+        "             ORDER BY joined_at DESC LIMIT 1)",
+        (guild_id, invitee_id),
     )
     conn.commit()
     return cur.rowcount > 0
