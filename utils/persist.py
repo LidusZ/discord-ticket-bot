@@ -124,7 +124,7 @@ async def restore_if_missing(bot) -> None:
         if not url:
             continue
         try:
-            async with aiohttp.ClientSession(total=30) as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         continue
